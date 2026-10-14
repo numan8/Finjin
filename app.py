@@ -57,9 +57,11 @@ def seed_data():
     return {"balance":245800.0,"card_frozen":False,"transactions":sorted(tx,key=lambda x:x["date"],reverse=True),"bills":{"electricity":{"amount":8500,"paid":False},"gas":{"amount":2400,"paid":False},"internet":{"amount":3200,"paid":False}},"beneficiaries":NAMES,"budget":None,"scheduled":[],"audit":[],"next_id":i+1}
 
 if "bank" not in st.session_state: st.session_state.bank = seed_data()
-if "messages" not in st.session_state: st.session_state.messages = [{"role":"assistant","content":"Hi! I'm Finjin 💠. Ask me to check your balance, analyze spending, pay a mock bill, or prepare a transfer. All accounts and transactions are fictional."}]
+if "messages" not in st.session_state: st.session_state.messages = []
 if "pending" not in st.session_state: st.session_state.pending = None
 if "statement" not in st.session_state: st.session_state.statement = None
+if "last_result" not in st.session_state: st.session_state.last_result = None
+if "command_version" not in st.session_state: st.session_state.command_version = 0
 
 bank = st.session_state.bank
 
@@ -202,8 +204,7 @@ def ask_ai(user_text):
         model=st.secrets.get("OPENAI_MODEL","gpt-4o-mini")
         client=OpenAI(api_key=key,timeout=25,max_retries=1)
         context=[{"role":"system","content":SYSTEM}]
-        for m in st.session_state.messages[-12:]:
-            context.append({"role":m["role"],"content":m["content"]})
+        context.append({"role":"user","content":user_text})
         response=client.chat.completions.create(model=model,messages=context,tools=TOOLS,tool_choice="auto",temperature=0.1)
         message=response.choices[0].message
         if not message.tool_calls:return message.content or "Could you rephrase that?",None
@@ -216,60 +217,86 @@ def ask_ai(user_text):
     except Exception as e:
         return "AI service unavailable. Check your API key, model, quota and connection, then try again. ("+type(e).__name__+")",None
 
-st.markdown('<div class="brand">◈ finjin <span class="subtle">· AI banking demo</span></div>',unsafe_allow_html=True)
-st.caption("100% simulated · No real banking connection")
+# Mobile-first, task-focused UX: after each completed task the input is cleared,
+# and the main screen is ready for the next instruction. No persistent chat thread.
+def finish_task(message, *, downloadable=False):
+    st.session_state.pending = None
+    st.session_state.last_result = {"text": message, "downloadable": downloadable}
+    st.session_state.command_version += 1
+    st.rerun()
+
+st.markdown('<div class="brand">◈ finjin <span class="subtle">· your AI banking assistant</span></div>',unsafe_allow_html=True)
+st.caption("DEMO MODE · All accounts and transactions are fictional")
 st.markdown(f'<div class="hero"><small>Available balance · Demo account</small><h1>{money(bank["balance"])}</h1><small>Personal Savings · •••• 4582 &nbsp; | &nbsp; PKR</small></div>',unsafe_allow_html=True)
 
-cols=st.columns(4)
-for col,icon,label,cmd in zip(cols,["↗️","🧾","📜","💳"],["Transfer","Pay bills","History","Card"],["Send Rs. 5000 to Ahmed","Pay my electricity bill","Show my transactions this month","Freeze my debit card"]):
-    with col:
-        if st.button(f"{icon}\n{label}",key="quick_"+label,use_container_width=True):st.session_state.quick=cmd
+st.markdown("#### What would you like to do?")
+st.caption("Type a command in English, Urdu, or Roman Urdu. Finjin will handle one task at a time.")
 
-home,chat,activity=st.tabs(["🏠 Home","✨ Finjin AI","🕘 Activity"])
-with home:
-    st.markdown('<div class="pill"><b>Ask Finjin</b><br>“Where did I spend the most money?”<br>“Mera balance kitna hai?”<br>“Send Rs. 5,000 to Ahmed.”</div>',unsafe_allow_html=True)
-    a,b=st.columns(2)
-    a.metric("This month's spending",money(monthly_spend()))
-    b.metric("Demo card","Frozen" if bank["card_frozen"] else "Active")
-    st.caption("Quick actions above insert example commands into the Finjin AI tab.")
-    if bank["budget"] is not None:st.info(f"Monthly budget: {money(bank['budget'])}")
-    if bank["scheduled"]:st.caption(f"{len(bank['scheduled'])} mock monthly payment schedule(s) saved (not auto-executed).")
-with chat:
-    st.subheader("Chat with Finjin")
-    st.caption("Ask in English or Roman Urdu. Actions are simulated and require confirmation.")
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):st.markdown(msg["content"])
-    if st.session_state.pending:
-        action=st.session_state.pending
-        st.warning(f"Awaiting your confirmation: {action['kind'].replace('_',' ').title()} (DEMO ONLY)")
-        left,right=st.columns(2)
-        if left.button("Confirm demo action",type="primary",use_container_width=True):
-            result=confirm(action);st.session_state.messages.append({"role":"assistant","content":result});st.session_state.pending=None;st.rerun()
-        if right.button("Cancel",use_container_width=True):
-            st.session_state.messages.append({"role":"assistant","content":"Cancelled. No changes made."});st.session_state.pending=None;st.rerun()
-    if st.session_state.statement:
-        st.download_button("⬇️ Download mock statement (CSV)",st.session_state.statement,file_name="finjin_mock_statement.csv",mime="text/csv")
-    prompt=st.chat_input("Ask Finjin to do something...")
-    if "quick" in st.session_state:
-        st.info(f"Quick action: {st.session_state.quick}")
-        if st.button("Send quick action",use_container_width=True):prompt=st.session_state.pop("quick")
-    if prompt:
-        if st.session_state.pending:
-            st.warning("Please confirm or cancel the pending demo action first.")
-        else:
-            st.session_state.messages.append({"role":"user","content":prompt})
-            with st.spinner("Finjin is thinking..."):
-                answer,pending=ask_ai(prompt)
-            st.session_state.messages.append({"role":"assistant","content":answer})
+# Results are visible until dismissed or replaced, but old chat history is not shown.
+if st.session_state.last_result:
+    result = st.session_state.last_result
+    st.success(result["text"])
+    if result.get("downloadable") and st.session_state.statement:
+        st.download_button("⬇️ Download mock statement (CSV)",st.session_state.statement,
+                           file_name="finjin_mock_statement.csv",mime="text/csv",use_container_width=True)
+    if st.button("✓ Done · Ready for next task",use_container_width=True):
+        st.session_state.last_result = None
+        st.session_state.statement = None
+        st.rerun()
+
+if st.session_state.pending:
+    action = st.session_state.pending
+    st.info("Review this MOCK action. Nothing changes until you confirm.")
+    st.markdown(f"**Action:** {action['kind'].replace('_',' ').title()}")
+    if "recipient" in action: st.write("Recipient:",action["recipient"])
+    if "provider" in action: st.write("Bill:",action["provider"].title())
+    if "amount" in action: st.write("Amount:",money(action["amount"]))
+    c1,c2=st.columns(2)
+    if c1.button("Confirm demo action",type="primary",use_container_width=True):
+        finish_task(confirm(action))
+    if c2.button("Cancel",use_container_width=True):
+        finish_task("Cancelled. No changes were made.")
+else:
+    with st.form(key=f"finjin_command_{st.session_state.command_version}",clear_on_submit=True):
+        command=st.text_area("Your instruction",placeholder="e.g. Send Rs. 5,000 to Ahmed",height=85,label_visibility="collapsed")
+        submitted=st.form_submit_button("✨ Ask Finjin",type="primary",use_container_width=True)
+    if submitted and command.strip():
+        st.session_state.last_result = None
+        st.session_state.statement = None
+        with st.spinner("Finjin is working on your request..."):
+            answer,pending=ask_ai(command.strip())
+        if pending:
             st.session_state.pending=pending
+            st.session_state.last_result={"text":answer,"downloadable":False}
+            st.session_state.command_version+=1
             st.rerun()
-with activity:
-    st.subheader("Recent transactions")
+        finish_task(answer,downloadable=(st.session_state.statement is not None))
+
+    with st.expander("Try an example command"):
+        st.markdown("""- How much money do I have?
+- Show all payments to Ali this month.
+- Send Rs. 5,000 to Ahmed.
+- Pay my electricity bill.
+- Create a monthly budget of Rs. 100,000.
+- Compare my spending with last month.
+- Freeze my debit card.
+- Calculate installments for a Rs. 1 million loan over 5 years at 18%.
+- Generate my last six months' statement.""")
+
+st.divider()
+with st.expander("📜 Recent mock transactions"):
     df=transactions()
-    if not df.empty:st.dataframe(df[["date","merchant","category","type","amount"]].head(30),hide_index=True,use_container_width=True)
-    st.caption("Only confirmed simulated operations update balances and records.")
-    if bank["audit"]:
-        with st.expander("Demo action audit log"):
-            st.json(bank["audit"])
-    if st.button("Reset demo account and conversation",use_container_width=True):
-        st.session_state.bank=seed_data();st.session_state.messages=[{"role":"assistant","content":"Demo reset. How can I help?"}];st.session_state.pending=None;st.session_state.statement=None;st.rerun()
+    if not df.empty:
+        st.dataframe(df[["date","merchant","type","amount"]].head(12),hide_index=True,use_container_width=True)
+with st.expander("⚙️ Demo settings"):
+    st.caption("Card status: "+("Frozen" if bank["card_frozen"] else "Active"))
+    if bank["budget"] is not None: st.caption("Monthly budget: "+money(bank["budget"]))
+    st.caption(f"{len(bank['scheduled'])} saved simulated payment schedule(s). No automatic transfers occur.")
+    if st.button("Reset demo account",use_container_width=True):
+        st.session_state.bank=seed_data()
+        st.session_state.messages=[]
+        st.session_state.pending=None
+        st.session_state.statement=None
+        st.session_state.last_result=None
+        st.session_state.command_version+=1
+        st.rerun()
